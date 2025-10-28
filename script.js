@@ -10,7 +10,7 @@ const firebaseConfig = {
   apiKey: "AIzaSyBSPDes90ZSZgMm9cjFGe1DFlxKBPe24AE",
 
   authDomain: "virtual-queue-system-a1834.firebaseapp.com",
-  databaseURL: "https://virtual-queue-system-a1834-default-rtdb.firebaseio.com",
+  databaseURL: "https://virtual-queue-system-a1834-default-rtdb.asia-southeast1.firebasedatabase.app",
 
   projectId: "virtual-queue-system-a1834",
 
