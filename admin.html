@@ -32,8 +32,81 @@
     <hr/>
     <h5>Current serving: <span id="admin-serving">-</span></h5>
     <p class="text-muted small">Click "Call Next" to call the smallest waiting number.</p>
+
+
+    
+    <hr>
+    <h3 class="mt-4">Analytics</h3>
+
+    <h5 class="mb-3">Average Waiting Time:
+        <span id="avgWait" class="fw-bold">Calculating...</span>
+    </h5>
+
+    <canvas id="peakChart" style="max-width: 600px; margin: auto;"></canvas>
+
+    <!-- Chart.js Library -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+   
+
+
   </div>
 
   <script type="module" src="admin.js"></script>
+
+ 
+  <script>
+    import { getDatabase, ref, onValue } from "https://www.gstatic.com/firebasejs/10.11.1/firebase-database.js";
+
+    const db = getDatabase();
+    const queueRef = ref(db, 'queue');
+
+    let hourLabels = Array.from({length: 24}, (_, i) => `${i}:00`);
+    let servedPerHour = new Array(24).fill(0);
+    let chart;
+
+    onValue(queueRef, (snapshot) => {
+        const data = snapshot.val();
+        let servingTimes = [];
+        servedPerHour.fill(0);
+
+        for (let key in data) {
+            const user = data[key];
+            if (user.status === "done" && user.joinedAt && user.servedAt) {
+                servingTimes.push(user.servedAt - user.joinedAt);
+                const hour = new Date(user.servedAt).getHours();
+                servedPerHour[hour]++;
+            }
+        }
+
+        const avgWait = servingTimes.length > 0
+            ? (servingTimes.reduce((a,b)=>a+b) / servingTimes.length) / 60000
+            : 0;
+        document.getElementById("avgWait").textContent =
+            avgWait.toFixed(1) + " mins";
+
+        updatePeakChart();
+    });
+
+    function updatePeakChart() {
+        if (chart) chart.destroy();
+        chart = new Chart(document.getElementById("peakChart"), {
+            type: 'bar',
+            data: {
+                labels: hourLabels,
+                datasets: [{
+                    label: 'Users Served Per Hour',
+                    data: servedPerHour
+                }]
+            },
+            options: {
+                responsive: true,
+                scales: { y: { beginAtZero: true } }
+            }
+        });
+    }
+  </script>
+  
+
+
 </body>
 </html>
