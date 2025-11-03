@@ -71,7 +71,7 @@ joinBtn.addEventListener('click', async () => {
       phone: phone || '',
       number: assignedNumber,
       status: 'waiting',
-      createdAt: new Date().toISOString()
+     joinedAt: Date.now()
     });
 
     // Save local info
