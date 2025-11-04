@@ -49,10 +49,10 @@
   </div>
 
   <!-- Chart.js Library (must load before admin.js uses Chart) -->
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <!-- Chart.js UMD build (works with ES modules + global Chart) -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script type="module" src="admin.js"></script>
 
-  <!-- Your module script (admin.js initializes Firebase and handles chart) -->
-  <script type="module" src="admin.js"></script>
 </body>
 </html>
 
