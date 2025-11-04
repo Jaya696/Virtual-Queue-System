@@ -1,4 +1,3 @@
-
 <!doctype html>
 <html>
 <head>
@@ -37,7 +36,7 @@
 
     <hr/>
     <h5>Current serving: <span id="admin-serving">-</span></h5>
-    <p class="small-muted">Click "Call Next" to call the smallest waiting number (or Push to Cloud Function if you use one).</p>
+    <p class="small-muted">Click "Call Next" to call the smallest waiting number.</p>
 
     <hr>
     <h3 class="mt-4">Analytics</h3>
@@ -48,27 +47,18 @@
   </div>
 
   <script>
-  // ---------- CONFIG: replace these with your project's firebase config ----------
- const firebaseConfig = {
+  // ---------- FIREBASE CONFIG ----------
+  const firebaseConfig = {
+    apiKey: "AIzaSyBSPDes90ZSZgMm9cjFGe1DFlxKBPe24AE",
+    authDomain: "virtual-queue-system-a1834.firebaseapp.com",
+    databaseURL: "https://virtual-queue-system-a1834-default-rtdb.asia-southeast1.firebasedatabase.app",
+    projectId: "virtual-queue-system-a1834",
+    storageBucket: "virtual-queue-system-a1834.firebasestorage.app",
+    messagingSenderId: "1081902069575",
+    appId: "1:1081902069575:web:3e6d91288c8102c0743e62"
+  };
+  // -------------------------------------
 
-  apiKey: "AIzaSyBSPDes90ZSZgMm9cjFGe1DFlxKBPe24AE",
-
-  authDomain: "virtual-queue-system-a1834.firebaseapp.com",
-  databaseURL: "https://virtual-queue-system-a1834-default-rtdb.asia-southeast1.firebasedatabase.app",
-
-
-  projectId: "virtual-queue-system-a1834",
-
-  storageBucket: "virtual-queue-system-a1834.firebasestorage.app",
-
-  messagingSenderId: "1081902069575",
-
-  appId: "1:1081902069575:web:3e6d91288c8102c0743e62"
-
-};
-  // ------------------------------------------------------------------------------
-
-  // Initialize Firebase (compat)
   firebase.initializeApp(firebaseConfig);
   const db = firebase.database();
 
@@ -81,14 +71,7 @@
   const refreshBtn = document.getElementById('refreshBtn');
   const peakCanvas = document.getElementById('peakChart');
 
-  // Chart variable
   let peakChart = null;
-
-  // Listen to changes based on selected queue
-  let itemsRef = null;
-  let servingRef = null;
-  let historyRef = null;
-  let metaRef = null;
   let listeners = [];
 
   function clearListeners() {
@@ -98,239 +81,143 @@
 
   function attachListenersFor(queueName) {
     clearListeners();
-    itemsRef = db.ref(`queues/${queueName}/items`);
-    servingRef = db.ref(`queues/${queueName}/serving`);
-    historyRef = db.ref(`queues/${queueName}/history`);
-    metaRef = db.ref(`queues/${queueName}/meta`);
+    const queueRef = db.ref(`queues/${queueName}`);
+    const servingRef = db.ref(`queues/${queueName}/serving`);
+    const historyRef = db.ref(`queues/${queueName}/history`);
+    const metaRef = db.ref(`queues/${queueName}/meta`);
 
-    // update items table
-    const itemsListener = itemsRef.on('value', snap => {
+    // Items listener
+    const itemListener = queueRef.on('value', snap => {
       const data = snap.val() || {};
       renderTable(data);
     });
-    listeners.push(itemsRef);
+    listeners.push(queueRef);
 
-    // update current serving display
-    const servingListener = servingRef.on('value', snap => {
-      const sv = snap.val();
-      if (!sv) {
-        servingEl.textContent = '-';
-      } else if (typeof sv === 'object') {
-        // if serving stored as object with name or number
-        servingEl.textContent = sv.name ?? sv.id ?? sv.number ?? JSON.stringify(sv);
-      } else {
-        servingEl.textContent = String(sv);
-      }
+    // Serving listener
+    const serveListener = servingRef.on('value', snap => {
+      const val = snap.val();
+      servingEl.textContent = val ? (val.name ?? val.id ?? val.number ?? '-') : '-';
     });
     listeners.push(servingRef);
 
-    // analytics watchers
+    // Analytics listeners
     const histListener = historyRef.on('value', snap => {
       const hist = snap.val() || {};
       updateAnalyticsFromHistory(hist);
     });
     listeners.push(historyRef);
 
-    // meta listener to show rolling average if present
     const metaListener = metaRef.on('value', snap => {
       const m = snap.val() || {};
-      if (m.avgWaitMs != null) {
+      if (m.avgWaitMs != null)
         avgWaitEl.textContent = (Math.round((m.avgWaitMs / 60000) * 10) / 10) + ' mins (rolling)';
-      }
     });
     listeners.push(metaRef);
   }
 
   function renderTable(itemsObj) {
     queueBody.innerHTML = '';
-    // If using numeric keys, order by numeric or timestamp
     const entries = Object.entries(itemsObj || {});
-    // Normalize to array with timestamp or number for sorting
-    const normalized = entries.map(([id, it]) => {
-      const ts = it.timestamp || (it.createdAt ? new Date(it.createdAt).getTime() : 0);
-      const num = (it.number != null) ? Number(it.number) : (it.ticketNumber != null ? Number(it.ticketNumber) : null);
-      return { id, it, ts, num };
-    });
-    // Sort: if have numeric ticket, sort by num asc; else by timestamp asc
-    normalized.sort((a,b) => {
-      if (a.num != null && b.num != null) return a.num - b.num;
-      return (a.ts || 0) - (b.ts || 0);
-    });
+    const normalized = entries
+      .filter(([id, it]) => id !== "serving" && id !== "meta" && id !== "history") // skip system nodes
+      .map(([id, it]) => {
+        const ts = it.timestamp || (it.createdAt ? new Date(it.createdAt).getTime() : 0);
+        const num = (it.number != null) ? Number(it.number) : null;
+        return { id, it, ts, num };
+      })
+      .sort((a, b) => a.num - b.num);
 
     normalized.forEach(({id, it}) => {
       const tr = document.createElement('tr');
       tr.innerHTML = `
-        <td>${it.number ?? it.ticketNumber ?? '-'}</td>
-        <td>${escapeHtml(it.name ?? it.phone ?? '-')}</td>
+        <td>${it.number ?? '-'}</td>
+        <td>${escapeHtml(it.name ?? '-')}</td>
         <td>${escapeHtml(it.status ?? 'waiting')}</td>
-        <td>
-          <button class="btn btn-sm btn-primary" data-id="${id}">Mark Served</button>
-        </td>`;
+        <td><button class="btn btn-sm btn-primary" data-id="${id}">Mark Served</button></td>`;
       queueBody.appendChild(tr);
-      const btn = tr.querySelector('button');
-      btn.addEventListener('click', () => markServed(locationSelect.value, id, it));
+      tr.querySelector('button').addEventListener('click', () => markServed(locationSelect.value, id, it));
     });
   }
 
-  // Utility: sanitize text for innerHTML insertion
   function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, function(m){ return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[m]; });
+    return String(s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
   }
 
-  // CALL NEXT: pick the earliest waiting item and set serving (atomic on client – not ideal for concurrency)
-  // If you want atomic safety, use a Cloud Function. This client-side version is simple and works in low-concurrency.
   async function callNext(queueName) {
-    const itemsSnapshot = await db.ref(`queues/${queueName}/items`).get();
+    const itemsSnapshot = await db.ref(`queues/${queueName}`).get();
     const items = itemsSnapshot.val() || {};
-    const entries = Object.entries(items);
-    if (entries.length === 0) {
-      alert('Queue is empty');
-      return;
-    }
-    // pick earliest by number if present, else by timestamp
-    let bestKey = null;
-    let bestVal = null;
-    entries.forEach(([k,v]) => {
-      if (!bestKey) { bestKey = k; bestVal = v; return; }
-      const aNum = (v.number != null) ? Number(v.number) : null;
-      const bNum = (bestVal.number != null) ? Number(bestVal.number) : null;
-      if (aNum != null && bNum != null) {
-        if (aNum < bNum) { bestKey = k; bestVal = v; }
-      } else {
-        const aTs = v.timestamp || (v.createdAt ? new Date(v.createdAt).getTime() : 0);
-        const bTs = bestVal.timestamp || (bestVal.createdAt ? new Date(bestVal.createdAt).getTime() : 0);
-        if ((aTs||0) < (bTs||0)) { bestKey = k; bestVal = v; }
-      }
-    });
+    const entries = Object.entries(items).filter(([id]) => !['serving','meta','history'].includes(id));
+    if (!entries.length) return alert('Queue empty');
 
-    if (!bestKey) { alert('No valid queue item found'); return; }
+    entries.sort((a, b) => (a[1].number ?? 99999) - (b[1].number ?? 99999));
+    const [bestKey, bestVal] = entries[0];
 
-    // set serving object (include startedAt)
-    const startedAt = Date.now();
-    const servingObj = { id: bestKey, name: bestVal.name ?? '', number: bestVal.number ?? bestVal.ticketNumber ?? null, timestamp: bestVal.timestamp ?? bestVal.createdAt ?? null, startedAt };
+    const servingObj = {
+      id: bestKey,
+      name: bestVal.name ?? '',
+      number: bestVal.number ?? null,
+      timestamp: bestVal.timestamp ?? Date.now(),
+      startedAt: Date.now()
+    };
+
     await db.ref(`queues/${queueName}/serving`).set(servingObj);
-
-    // optionally remove from items — some flows keep serving separate and remove when served. We'll keep it in items until 'Mark Served' to allow cancel.
-    // If you prefer to auto-remove: uncomment next line
-    // await db.ref(`queues/${queueName}/items/${bestKey}`).remove();
   }
 
-  // MARK SERVED: move item to history, update meta rolling average, remove item & clear serving
   async function markServed(queueName, itemId, itemData) {
     try {
       const now = Date.now();
-      // Use startedAt from serving if present
-      const servingSnap = await db.ref(`queues/${queueName}/serving`).get();
-      const servingObj = servingSnap.val();
-      let startedAt = itemData.startedAt || (servingObj && servingObj.id === itemId && servingObj.startedAt) || now;
-      const joinTs = itemData.timestamp || (itemData.createdAt ? new Date(itemData.createdAt).getTime() : now);
+      const joinTs = itemData.timestamp || now;
+      const startedAt = itemData.startedAt || now;
 
-      const servedRecord = {
-        id: itemId,
-        name: itemData.name ?? null,
-        number: itemData.number ?? itemData.ticketNumber ?? null,
-        timestamp: joinTs,
-        startedAt,
-        servedAt: now
-      };
+      const servedRecord = { id: itemId, name: itemData.name, number: itemData.number, timestamp: joinTs, startedAt, servedAt: now };
+      const waitMs = Math.max(0, startedAt - joinTs);
 
-      // compute waiting time (time until service started)
-      const waitingMs = Math.max(0, startedAt - joinTs);
-
-      // update history, meta, remove item, and optionally clear serving if same id
       const metaRef = db.ref(`queues/${queueName}/meta`);
       const metaSnap = await metaRef.get();
       const meta = metaSnap.val() || {};
-      const prevCount = meta.countServed || 0;
-      const prevAvg = meta.avgWaitMs || 0;
-      const newCount = prevCount + 1;
-      const newAvg = Math.round((prevAvg * prevCount + waitingMs) / newCount);
+      const newCount = (meta.countServed || 0) + 1;
+      const newAvg = Math.round(((meta.avgWaitMs || 0) * (newCount - 1) + waitMs) / newCount);
 
       const updates = {};
       updates[`queues/${queueName}/history/${itemId}`] = servedRecord;
       updates[`queues/${queueName}/meta/avgWaitMs`] = newAvg;
       updates[`queues/${queueName}/meta/countServed`] = newCount;
-      updates[`queues/${queueName}/items/${itemId}`] = null;
-
-      // if the serving object matches this id, clear serving
-      const currentServing = servingObj;
-      if (currentServing && currentServing.id === itemId) {
-        updates[`queues/${queueName}/serving`] = null;
-      }
+      updates[`queues/${queueName}/${itemId}`] = null;
+      updates[`queues/${queueName}/serving`] = null;
 
       await db.ref().update(updates);
-      // UI update will happen automatically through listeners
-    } catch (err) {
-      console.error('markServed error', err);
-      alert('Error marking served: ' + err.message);
+    } catch (e) {
+      alert('Error marking served: ' + e.message);
     }
   }
 
-  // ANALYTICS: compute average wait and served per hour from history
-  function updateAnalyticsFromHistory(historyObj) {
-    const histArr = Object.values(historyObj || {});
-    // filter valid entries
-    const served = histArr.filter(h => h && h.timestamp && (h.startedAt || h.servedAt));
-    // compute waitMs: use startedAt - timestamp if startedAt present, else servedAt - timestamp
-    const waitMsArr = served.map(h => {
-      const ts = h.timestamp || (h.joinedAt ? new Date(h.joinedAt).getTime() : null);
-      const start = h.startedAt || h.servedAt || null;
-      return (start && ts) ? Math.max(0, start - ts) : null;
-    }).filter(x => x != null);
+  function updateAnalyticsFromHistory(hist) {
+    const arr = Object.values(hist || {});
+    const waitMsArr = arr.map(h => (h.startedAt || h.servedAt) - h.timestamp).filter(x => x > 0);
+    const avgMin = waitMsArr.length ? (waitMsArr.reduce((a,b)=>a+b)/waitMsArr.length)/60000 : 0;
+    avgWaitEl.textContent = avgMin ? avgMin.toFixed(1) + ' mins' : '—';
 
-    // average waiting time (minutes)
-    const avgMin = waitMsArr.length ? (waitMsArr.reduce((a,b)=>a+b,0) / waitMsArr.length) / 60000 : 0;
-    avgWaitEl.textContent = avgMin ? (Math.round(avgMin * 10)/10) + ' mins' : '—';
-
-    // serve-per-hour counts (use servedAt or startedAt as served time)
     const counts = new Array(24).fill(0);
-    served.forEach(h => {
-      const servedAt = h.servedAt || h.startedAt || Date.now();
-      const hr = new Date(servedAt).getHours();
-      counts[hr] = (counts[hr] || 0) + 1;
-    });
-
+    arr.forEach(h => { const hr = new Date(h.servedAt).getHours(); counts[hr]++; });
     drawPeakChart(counts);
   }
 
   function drawPeakChart(counts) {
-    const labels = counts.map((_,i) => `${i}:00`);
+    const labels = counts.map((_,i)=>`${i}:00`);
     if (peakChart) peakChart.destroy();
     peakChart = new Chart(peakCanvas, {
       type: 'bar',
-      data: {
-        labels,
-        datasets: [{
-          label: 'Users Served Per Hour',
-          data: counts,
-          backgroundColor: 'rgba(54,162,235,0.6)',
-          borderColor: 'rgba(54,162,235,1)',
-          borderWidth: 1
-        }]
-      },
-      options: {
-        responsive: true,
-        scales: { y: { beginAtZero: true }, x: { ticks: { maxRotation: 0 } } }
-      }
+      data: { labels, datasets:[{label:'Users Served Per Hour',data:counts,backgroundColor:'rgba(54,162,235,0.6)'}]},
+      options: { responsive:true, scales:{y:{beginAtZero:true}} }
     });
   }
 
-  // UI wiring
   locationSelect.addEventListener('change', () => attachListenersFor(locationSelect.value));
   callNextBtn.addEventListener('click', () => callNext(locationSelect.value));
-  refreshBtn.addEventListener('click', () => {
-    // manual refresh: read items once and re-render (listeners already do this)
-    db.ref(`queues/${locationSelect.value}/items`).get().then(s => renderTable(s.val()||{}));
-  });
+  refreshBtn.addEventListener('click', () => db.ref(`queues/${locationSelect.value}`).get().then(s => renderTable(s.val()||{})));
 
-  // start with selected location
   attachListenersFor(locationSelect.value);
-
-  // Optional: expose functions for debugging
-  window._vq = {
-    callNext: () => callNext(locationSelect.value),
-    markServed: (id) => db.ref(`queues/${locationSelect.value}/items/${id}`).get().then(s => markServed(locationSelect.value, id, s.val()))
-  };
   </script>
 </body>
 </html>
+
