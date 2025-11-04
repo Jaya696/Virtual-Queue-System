@@ -1,4 +1,4 @@
-// admin.js
+// admin.js (REPLACE your current file with this)
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
 import {
   getDatabase, ref, onValue, set, get
@@ -32,7 +32,22 @@ let lastSnapshotData = {};
 let historyUnsubscribe = null;
 let peakChart = null;
 
-// ---------------- UI wiring ----------------
+// ---------- Helper: normalize timestamps to milliseconds ----------
+function toMs(v) {
+  if (v == null) return null;
+  if (typeof v === 'number' && !isNaN(v)) return v;
+  if (typeof v === 'string') {
+    // numeric string?
+    const n = Number(v);
+    if (!Number.isNaN(n)) return n;
+    // try Date.parse for ISO strings
+    const p = Date.parse(v);
+    if (!Number.isNaN(p)) return p;
+  }
+  return null;
+}
+
+// ---------- UI wiring ----------
 adminLocation.addEventListener('change', () => {
   currentLocation = adminLocation.value;
   startQueueListener();
@@ -49,8 +64,10 @@ callNextBtn.addEventListener('click', async () => {
   const arr = [];
   for (const k in data) {
     if (!data[k]) continue;
+    // skip system nodes
+    if (k === 'history' || k === 'meta' || k === 'serving') continue;
     const e = data[k];
-    arr.push({ key: k, number: e.number, status: e.status });
+    arr.push({ key: k, number: e.number, status: e.status, ts: toMs(e.timestamp || e.createdAt || e.joinedAt) });
   }
 
   const waiting = arr.filter(e => e.status === 'waiting').sort((a, b) => (a.number ?? 99999) - (b.number ?? 99999));
@@ -59,14 +76,11 @@ callNextBtn.addEventListener('click', async () => {
     return;
   }
 
-  // next is the item's key or number depending on how you store it
   const nextEntry = waiting[0];
   const nextKey = nextEntry.key;
-  // update that entry -> set status called
   const entryRef = ref(db, `queues/${currentLocation}/${nextKey}`);
   await set(entryRef, { ...data[nextKey], status: 'called', number: nextEntry.number ?? data[nextKey].number ?? null, calledAt: new Date().toISOString() });
 
-  // set serving pointer under queues/<location>/serving
   const servingRef = ref(db, `queues/${currentLocation}/serving`);
   await set(servingRef, { id: nextKey, number: nextEntry.number ?? data[nextKey].number ?? null, name: data[nextKey].name ?? null, startedAt: Date.now() });
 
@@ -87,7 +101,6 @@ function startQueueListener() {
   const servingRef = ref(db, `queues/${currentLocation}/serving`);
   onValue(servingRef, (s) => {
     const val = s.exists() ? s.val() : '-';
-    // val may be object or number
     adminServingEl.textContent = (val && typeof val === 'object') ? (val.number ?? val.id ?? val.name ?? '-') : String(val);
   });
 
@@ -101,7 +114,6 @@ function startQueueListener() {
   const histRef = ref(db, `queues/${currentLocation}/history`);
   historyUnsubscribe = onValue(histRef, (hsnap) => {
     const hist = hsnap.val() || {};
-    // pass queue name as second arg for fallback scan
     updateAnalyticsFromHistory(hist, currentLocation);
   });
 }
@@ -111,7 +123,6 @@ function renderQueue(data) {
   const arr = [];
   for (const k in data) {
     if (!data[k]) continue;
-    // skip system children
     if (k === 'history' || k === 'meta' || k === 'serving') continue;
     const e = data[k];
     arr.push({
@@ -145,23 +156,22 @@ function renderQueue(data) {
 
       const entryRef = ref(db, `queues/${currentLocation}/${key}`);
       const now = Date.now();
-      // read latest entry data
       const snap = await get(entryRef);
       const entry = snap.val() || {};
       await set(entryRef, { ...entry, status: 'served', servedAt: now });
 
-      // update serving pointer to this served item (clear or set as desired)
+      // clear serving pointer
       const servingRef = ref(db, `queues/${currentLocation}/serving`);
       await set(servingRef, null);
 
-      // add to history (store served record)
+      // add to history (store served record) — ensure numeric ms
       const historyRef = ref(db, `queues/${currentLocation}/history/${key}`);
       const record = {
         id: key,
         name: entry.name || null,
         number: entry.number ?? null,
-        timestamp: entry.timestamp ?? entry.createdAt ?? entry.joinedAt ?? now,
-        startedAt: entry.startedAt ?? entry.calledAt ? Date.parse(entry.calledAt) : null,
+        timestamp: toMs(entry.timestamp ?? entry.createdAt ?? entry.joinedAt ?? now),
+        startedAt: toMs(entry.startedAt ?? (entry.calledAt ? Date.parse(entry.calledAt) : null)),
         servedAt: now
       };
       await set(historyRef, record);
@@ -176,8 +186,6 @@ function escapeHtml(s) {
 }
 
 // ---------------- Analytics + Chart ----------------
-
-// draw (or re-draw) the bar chart from counts array [24]
 function drawPeakChart(counts) {
   const labels = counts.map((_, i) => `${i}:00`);
   if (peakChart) peakChart.destroy();
@@ -200,23 +208,21 @@ function drawPeakChart(counts) {
   });
 }
 
-// Helper: build analytics from history object (preferred)
 function buildFromHistoryObj(histObj) {
   const arr = Object.values(histObj || {});
   const waits = [];
   const counts = new Array(24).fill(0);
   arr.forEach(h => {
-    const ts = h.timestamp ?? h.joinedAt ?? null;
-    const start = h.startedAt ?? null;
-    const servedAt = h.servedAt ?? start ?? null;
+    const ts = toMs(h.timestamp ?? h.joinedAt ?? null);
+    const start = toMs(h.startedAt ?? null);
+    const servedAt = toMs(h.servedAt ?? start ?? null);
 
-    // compute wait using startedAt - timestamp if possible, else servedAt - timestamp
     let waitMs = null;
-    if (ts && start) waitMs = Math.max(0, start - ts);
-    else if (ts && servedAt) waitMs = Math.max(0, servedAt - ts);
+    if (ts != null && start != null) waitMs = Math.max(0, start - ts);
+    else if (ts != null && servedAt != null) waitMs = Math.max(0, servedAt - ts);
 
     if (waitMs != null) waits.push(waitMs);
-    if (servedAt) {
+    if (servedAt != null) {
       const hr = new Date(servedAt).getHours();
       counts[hr] = (counts[hr] || 0) + 1;
     }
@@ -224,7 +230,6 @@ function buildFromHistoryObj(histObj) {
   return { waits, counts };
 }
 
-// Fallback: scan live queue node for items that are served
 async function buildFromQueueFallback(queueName) {
   const snap = await get(ref(db, `queues/${queueName}`));
   const node = snap.val() || {};
@@ -234,12 +239,10 @@ async function buildFromQueueFallback(queueName) {
     if (!v || typeof v !== 'object') return;
     if (k === 'history' || k === 'meta' || k === 'serving') return;
     if (v.status === 'served' || v.status === 'called') {
-      const ts = v.timestamp ?? v.joinedAt ?? null;
-      const servedAt = v.servedAt ?? v.startedAt ?? null;
-      if (ts && servedAt) {
-        waits.push(Math.max(0, (v.startedAt || servedAt) - ts));
-      }
-      if (servedAt) {
+      const ts = toMs(v.timestamp ?? v.joinedAt ?? null);
+      const servedAt = toMs(v.servedAt ?? v.startedAt ?? null);
+      if (ts != null && servedAt != null) waits.push(Math.max(0, (v.startedAt || servedAt) - ts));
+      if (servedAt != null) {
         const hr = new Date(servedAt).getHours();
         counts[hr] = (counts[hr] || 0) + 1;
       }
@@ -248,7 +251,6 @@ async function buildFromQueueFallback(queueName) {
   return { waits, counts };
 }
 
-// Main updater: prefer history, else fallback to scanning queue node
 async function updateAnalyticsFromHistory(histObjOrNull, queueName) {
   let waits = [], counts = new Array(24).fill(0);
 
@@ -270,3 +272,4 @@ async function updateAnalyticsFromHistory(histObjOrNull, queueName) {
 
 // ---------------- Start ----------------
 startQueueListener();
+
