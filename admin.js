@@ -70,21 +70,94 @@ callNextBtn.addEventListener('click', async () => {
 });
 
 // Start listener
+// ---------- REPLACE startQueueListener with this enhanced version ----------
+let historyUnsubscribe = null; // will hold the onValue unsubscribe for history
+
 function startQueueListener() {
   const qRef = ref(db, `queues/${currentLocation}`);
+  // main items listener
   onValue(qRef, (snap) => {
     const data = snap.val() || {};
     lastSnapshotData = data;
     renderQueue(data);
   });
 
-  // ✅ Fixed serving pointer listener path
+  // serving pointer listener (under queues/<location>/serving)
   const servingRef = ref(db, `queues/${currentLocation}/serving`);
   onValue(servingRef, (s) => {
     const serving = s.exists() ? s.val() : '-';
     adminServingEl.textContent = serving;
   });
+
+  // detach previous history listener if exists
+  if (typeof historyUnsubscribe === 'function') {
+    try { historyUnsubscribe(); } catch(e) { /* ignore */ }
+    historyUnsubscribe = null;
+  }
+
+  // attach new history listener for analytics/chart
+  const histRef = ref(db, `queues/${currentLocation}/history`);
+  historyUnsubscribe = onValue(histRef, (hsnap) => {
+    const hist = hsnap.val() || {};
+    updateAnalyticsFromHistory(hist);
+  });
 }
+// ---------- Analytics + Chart helpers (paste after startQueueListener) ----------
+let peakChart = null;
+const peakCanvas = document.getElementById('peakChart');
+
+// draw (or re-draw) the bar chart from counts array [24]
+function drawPeakChart(counts) {
+  const labels = counts.map((_, i) => `${i}:00`);
+  if (peakChart) peakChart.destroy();
+  peakChart = new Chart(peakCanvas, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Users Served Per Hour',
+        data: counts,
+        backgroundColor: 'rgba(54,162,235,0.6)',
+        borderColor: 'rgba(54,162,235,1)',
+        borderWidth: 1
+      }]
+    },
+    options: {
+      responsive: true,
+      scales: { y: { beginAtZero: true } }
+    }
+  });
+}
+
+// compute average wait and counts per hour from history object and update UI + chart
+function updateAnalyticsFromHistory(historyObj) {
+  const arr = Object.values(historyObj || {});
+
+  // compute waiting times (use startedAt if present, otherwise servedAt)
+  const waitMsArr = arr
+    .map(h => {
+      const join = h.timestamp || h.joinedAt || null;
+      const start = h.startedAt || h.servedAt || null;
+      return (join && start) ? Math.max(0, start - join) : null;
+    })
+    .filter(x => x != null);
+
+  // average waiting time in minutes (1 decimal)
+  const avgMin = waitMsArr.length ? (waitMsArr.reduce((a,b)=>a+b,0) / waitMsArr.length) / 60000 : 0;
+  document.getElementById('avgWait').textContent = avgMin ? (Math.round(avgMin*10)/10) + ' mins' : '—';
+
+  // served-per-hour counts (use servedAt or startedAt)
+  const counts = new Array(24).fill(0);
+  arr.forEach(h => {
+    const servedAt = h.servedAt || h.startedAt || null;
+    if (!servedAt) return;
+    const hr = new Date(servedAt).getHours();
+    if (typeof hr === 'number') counts[hr] = (counts[hr] || 0) + 1;
+  });
+
+  drawPeakChart(counts);
+}
+
 
 function renderQueue(data) {
   const arr = [];
