@@ -33,6 +33,15 @@
       </thead>
       <tbody id="queue-body"></tbody>
     </table>
+    <!-- ===== Queue Analytics Section ===== -->
+<hr>
+<h3>Queue Analytics</h3>
+<p><b>Average Waiting Time:</b> <span id="avgWait">—</span></p>
+
+<div style="width: 80%; max-width: 700px; margin-top: 20px;">
+  <canvas id="peakChart"></canvas>
+</div>
+
 
     <hr/>
     <h5>Current serving: <span id="admin-serving">-</span></h5>
@@ -218,6 +227,12 @@
 
   attachListenersFor(locationSelect.value);
   </script>
+  <!-- Chart.js Library -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<!-- Your Admin Logic -->
+<script type="module" src="admin.js"></script>
+
 </body>
 </html>
 
