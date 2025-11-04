@@ -1,7 +1,7 @@
 // admin.js
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
 import {
-  getDatabase, ref, onValue, set
+  getDatabase, ref, onValue, set, get
 } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js";
 
 // ======== YOUR FIREBASE CONFIG ========
@@ -24,74 +24,76 @@ const queueBody = document.getElementById('queue-body');
 const callNextBtn = document.getElementById('callNextBtn');
 const adminServingEl = document.getElementById('admin-serving');
 const refreshBtn = document.getElementById('refreshBtn');
+const peakCanvas = document.getElementById('peakChart');
+const avgWaitEl = document.getElementById('avgWait');
 
 let currentLocation = adminLocation.value;
 let lastSnapshotData = {};
+let historyUnsubscribe = null;
+let peakChart = null;
 
-// Listen to location change
+// ---------------- UI wiring ----------------
 adminLocation.addEventListener('change', () => {
   currentLocation = adminLocation.value;
   startQueueListener();
 });
 
-// Refresh button
 refreshBtn.addEventListener('click', () => {
   renderQueue(lastSnapshotData);
 });
 
-// Call Next
 callNextBtn.addEventListener('click', async () => {
   const qRef = ref(db, `queues/${currentLocation}`);
-  onValue(qRef, async (snap) => {
-    const data = snap.val() || {};
-    const arr = [];
-    for (const k in data) {
-      if (!data[k]) continue;
-      const e = data[k];
-      arr.push({ key: k, number: e.number, status: e.status });
-    }
+  const snap = await get(qRef);
+  const data = snap.val() || {};
+  const arr = [];
+  for (const k in data) {
+    if (!data[k]) continue;
+    const e = data[k];
+    arr.push({ key: k, number: e.number, status: e.status });
+  }
 
-    const waiting = arr.filter(e => e.status === 'waiting').sort((a, b) => a.number - b.number);
-    if (waiting.length === 0) {
-      alert('No waiting users');
-      return;
-    }
+  const waiting = arr.filter(e => e.status === 'waiting').sort((a, b) => (a.number ?? 99999) - (b.number ?? 99999));
+  if (waiting.length === 0) {
+    alert('No waiting users');
+    return;
+  }
 
-    const next = waiting[0].number;
-    const entryRef = ref(db, `queues/${currentLocation}/${next}`);
-    await set(entryRef, { ...data[next], status: 'called', number: next, calledAt: new Date().toISOString() });
+  // next is the item's key or number depending on how you store it
+  const nextEntry = waiting[0];
+  const nextKey = nextEntry.key;
+  // update that entry -> set status called
+  const entryRef = ref(db, `queues/${currentLocation}/${nextKey}`);
+  await set(entryRef, { ...data[nextKey], status: 'called', number: nextEntry.number ?? data[nextKey].number ?? null, calledAt: new Date().toISOString() });
 
-    // ✅ Fixed path for serving pointer
-    const servingRef = ref(db, `queues/${currentLocation}/serving`);
-    await set(servingRef, next);
+  // set serving pointer under queues/<location>/serving
+  const servingRef = ref(db, `queues/${currentLocation}/serving`);
+  await set(servingRef, { id: nextKey, number: nextEntry.number ?? data[nextKey].number ?? null, name: data[nextKey].name ?? null, startedAt: Date.now() });
 
-    alert('Called number ' + next);
-  }, { onlyOnce: true });
+  alert('Called entry ' + (nextEntry.number ?? nextKey));
 });
 
-// Start listener
-// ---------- REPLACE startQueueListener with this enhanced version ----------
-let historyUnsubscribe = null; // will hold the onValue unsubscribe for history
-
+// ---------------- Listeners ----------------
 function startQueueListener() {
+  // main queue node
   const qRef = ref(db, `queues/${currentLocation}`);
-  // main items listener
   onValue(qRef, (snap) => {
     const data = snap.val() || {};
     lastSnapshotData = data;
     renderQueue(data);
   });
 
-  // serving pointer listener (under queues/<location>/serving)
+  // serving pointer listener under queues/<location>/serving
   const servingRef = ref(db, `queues/${currentLocation}/serving`);
   onValue(servingRef, (s) => {
-    const serving = s.exists() ? s.val() : '-';
-    adminServingEl.textContent = serving;
+    const val = s.exists() ? s.val() : '-';
+    // val may be object or number
+    adminServingEl.textContent = (val && typeof val === 'object') ? (val.number ?? val.id ?? val.name ?? '-') : String(val);
   });
 
   // detach previous history listener if exists
   if (typeof historyUnsubscribe === 'function') {
-    try { historyUnsubscribe(); } catch(e) { /* ignore */ }
+    try { historyUnsubscribe(); } catch (e) { /* ignore */ }
     historyUnsubscribe = null;
   }
 
@@ -99,12 +101,81 @@ function startQueueListener() {
   const histRef = ref(db, `queues/${currentLocation}/history`);
   historyUnsubscribe = onValue(histRef, (hsnap) => {
     const hist = hsnap.val() || {};
-    updateAnalyticsFromHistory(hist);
+    // pass queue name as second arg for fallback scan
+    updateAnalyticsFromHistory(hist, currentLocation);
   });
 }
-// ---------- Analytics + Chart helpers (paste after startQueueListener) ----------
-let peakChart = null;
-const peakCanvas = document.getElementById('peakChart');
+
+// ---------------- Render queue table ----------------
+function renderQueue(data) {
+  const arr = [];
+  for (const k in data) {
+    if (!data[k]) continue;
+    // skip system children
+    if (k === 'history' || k === 'meta' || k === 'serving') continue;
+    const e = data[k];
+    arr.push({
+      key: k,
+      name: e.name || '',
+      number: (e.number != null) ? e.number : (isFinite(parseInt(k)) ? parseInt(k) : null),
+      status: e.status || 'waiting'
+    });
+  }
+
+  arr.sort((a, b) => (a.number ?? 0) - (b.number ?? 0));
+  queueBody.innerHTML = '';
+
+  for (const e of arr) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${e.number ?? '-'}</td>
+      <td>${escapeHtml(e.name)}</td>
+      <td>${escapeHtml(e.status)}</td>
+      <td>
+        ${e.status !== 'served' ? `<button data-key="${e.key}" class="btn btn-sm btn-primary mark-served">Mark Served</button>` : ''}
+      </td>
+    `;
+    queueBody.appendChild(tr);
+  }
+
+  document.querySelectorAll('.mark-served').forEach(btn => {
+    btn.addEventListener('click', async (ev) => {
+      const key = ev.target.getAttribute('data-key');
+      if (!confirm(`Mark ${key} as served?`)) return;
+
+      const entryRef = ref(db, `queues/${currentLocation}/${key}`);
+      const now = Date.now();
+      // read latest entry data
+      const snap = await get(entryRef);
+      const entry = snap.val() || {};
+      await set(entryRef, { ...entry, status: 'served', servedAt: now });
+
+      // update serving pointer to this served item (clear or set as desired)
+      const servingRef = ref(db, `queues/${currentLocation}/serving`);
+      await set(servingRef, null);
+
+      // add to history (store served record)
+      const historyRef = ref(db, `queues/${currentLocation}/history/${key}`);
+      const record = {
+        id: key,
+        name: entry.name || null,
+        number: entry.number ?? null,
+        timestamp: entry.timestamp ?? entry.createdAt ?? entry.joinedAt ?? now,
+        startedAt: entry.startedAt ?? entry.calledAt ? Date.parse(entry.calledAt) : null,
+        servedAt: now
+      };
+      await set(historyRef, record);
+
+      alert('Marked served: ' + (entry.number ?? key));
+    });
+  });
+}
+
+function escapeHtml(s) {
+  return String(s || '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+}
+
+// ---------------- Analytics + Chart ----------------
 
 // draw (or re-draw) the bar chart from counts array [24]
 function drawPeakChart(counts) {
@@ -129,83 +200,73 @@ function drawPeakChart(counts) {
   });
 }
 
-// compute average wait and counts per hour from history object and update UI + chart
-function updateAnalyticsFromHistory(historyObj) {
-  const arr = Object.values(historyObj || {});
-
-  // compute waiting times (use startedAt if present, otherwise servedAt)
-  const waitMsArr = arr
-    .map(h => {
-      const join = h.timestamp || h.joinedAt || null;
-      const start = h.startedAt || h.servedAt || null;
-      return (join && start) ? Math.max(0, start - join) : null;
-    })
-    .filter(x => x != null);
-
-  // average waiting time in minutes (1 decimal)
-  const avgMin = waitMsArr.length ? (waitMsArr.reduce((a,b)=>a+b,0) / waitMsArr.length) / 60000 : 0;
-  document.getElementById('avgWait').textContent = avgMin ? (Math.round(avgMin*10)/10) + ' mins' : '—';
-
-  // served-per-hour counts (use servedAt or startedAt)
+// Helper: build analytics from history object (preferred)
+function buildFromHistoryObj(histObj) {
+  const arr = Object.values(histObj || {});
+  const waits = [];
   const counts = new Array(24).fill(0);
   arr.forEach(h => {
-    const servedAt = h.servedAt || h.startedAt || null;
-    if (!servedAt) return;
-    const hr = new Date(servedAt).getHours();
-    if (typeof hr === 'number') counts[hr] = (counts[hr] || 0) + 1;
+    const ts = h.timestamp ?? h.joinedAt ?? null;
+    const start = h.startedAt ?? null;
+    const servedAt = h.servedAt ?? start ?? null;
+
+    // compute wait using startedAt - timestamp if possible, else servedAt - timestamp
+    let waitMs = null;
+    if (ts && start) waitMs = Math.max(0, start - ts);
+    else if (ts && servedAt) waitMs = Math.max(0, servedAt - ts);
+
+    if (waitMs != null) waits.push(waitMs);
+    if (servedAt) {
+      const hr = new Date(servedAt).getHours();
+      counts[hr] = (counts[hr] || 0) + 1;
+    }
   });
+  return { waits, counts };
+}
+
+// Fallback: scan live queue node for items that are served
+async function buildFromQueueFallback(queueName) {
+  const snap = await get(ref(db, `queues/${queueName}`));
+  const node = snap.val() || {};
+  const waits = [];
+  const counts = new Array(24).fill(0);
+  Object.entries(node).forEach(([k, v]) => {
+    if (!v || typeof v !== 'object') return;
+    if (k === 'history' || k === 'meta' || k === 'serving') return;
+    if (v.status === 'served' || v.status === 'called') {
+      const ts = v.timestamp ?? v.joinedAt ?? null;
+      const servedAt = v.servedAt ?? v.startedAt ?? null;
+      if (ts && servedAt) {
+        waits.push(Math.max(0, (v.startedAt || servedAt) - ts));
+      }
+      if (servedAt) {
+        const hr = new Date(servedAt).getHours();
+        counts[hr] = (counts[hr] || 0) + 1;
+      }
+    }
+  });
+  return { waits, counts };
+}
+
+// Main updater: prefer history, else fallback to scanning queue node
+async function updateAnalyticsFromHistory(histObjOrNull, queueName) {
+  let waits = [], counts = new Array(24).fill(0);
+
+  if (histObjOrNull && Object.keys(histObjOrNull).length > 0) {
+    const res = buildFromHistoryObj(histObjOrNull);
+    waits = res.waits;
+    counts = res.counts;
+  } else {
+    const res = await buildFromQueueFallback(queueName);
+    waits = res.waits;
+    counts = res.counts;
+  }
+
+  const avgMin = (waits.length) ? (waits.reduce((a,b)=>a+b,0) / waits.length) / 60000 : 0;
+  avgWaitEl.textContent = avgMin ? (Math.round(avgMin * 10) / 10) + ' mins' : '—';
 
   drawPeakChart(counts);
 }
 
-
-function renderQueue(data) {
-  const arr = [];
-  for (const k in data) {
-    if (!data[k]) continue;
-    const e = data[k];
-    arr.push({
-      key: k,
-      name: e.name || '',
-      number: e.number || (e.number === 0 ? 0 : parseInt(k) || 0),
-      status: e.status || 'waiting'
-    });
-  }
-
-  arr.sort((a, b) => a.number - b.number);
-  queueBody.innerHTML = '';
-
-  for (const e of arr) {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td>${e.number}</td>
-      <td>${e.name}</td>
-      <td>${e.status}</td>
-      <td>
-        ${e.status !== 'served' ? `<button data-number="${e.number}" class="btn btn-sm btn-primary mark-served">Mark Served</button>` : ''}
-      </td>
-    `;
-    queueBody.appendChild(tr);
-  }
-
-  document.querySelectorAll('.mark-served').forEach(btn => {
-    btn.addEventListener('click', async (ev) => {
-      const num = ev.target.getAttribute('data-number');
-      if (!confirm(`Mark ${num} as served?`)) return;
-
-      const entryRef = ref(db, `queues/${currentLocation}/${num}`);
-      const now = new Date().toISOString();
-      await set(entryRef, { ...lastSnapshotData[num], status: 'served', servedAt: now, number: parseInt(num) });
-
-      // ✅ Fixed serving pointer path
-      const servingRef = ref(db, `queues/${currentLocation}/serving`);
-      await set(servingRef, parseInt(num));
-
-      alert('Marked served: ' + num);
-    });
-  });
-}
-
-// Start initial listener
+// ---------------- Start ----------------
 startQueueListener();
-
