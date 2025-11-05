@@ -1,20 +1,31 @@
-// admin.js (REPLACE your current file with this)
+
+
+// admin.js
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
 import {
-  getDatabase, ref, onValue, set, get
+  getDatabase, ref, onValue, set
 } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js";
 
-// ======== YOUR FIREBASE CONFIG ========
+// ======== REPLACE WITH YOUR FIREBASE CONFIG ========
 const firebaseConfig = {
+
   apiKey: "AIzaSyBSPDes90ZSZgMm9cjFGe1DFlxKBPe24AE",
+
   authDomain: "virtual-queue-system-a1834.firebaseapp.com",
   databaseURL: "https://virtual-queue-system-a1834-default-rtdb.asia-southeast1.firebasedatabase.app",
+
+
   projectId: "virtual-queue-system-a1834",
+
   storageBucket: "virtual-queue-system-a1834.firebasestorage.app",
+
   messagingSenderId: "1081902069575",
+
   appId: "1:1081902069575:web:3e6d91288c8102c0743e62"
+
 };
-// =======================================
+
+// =================================================
 
 const app = initializeApp(firebaseConfig);
 const db = getDatabase(app);
@@ -24,126 +35,131 @@ const queueBody = document.getElementById('queue-body');
 const callNextBtn = document.getElementById('callNextBtn');
 const adminServingEl = document.getElementById('admin-serving');
 const refreshBtn = document.getElementById('refreshBtn');
-const peakCanvas = document.getElementById('peakChart');
-const avgWaitEl = document.getElementById('avgWait');
+const avgWaitEl = document.getElementById('avg-wait');
+const waitChartCtx = document.getElementById('waitChart').getContext('2d');
 
 let currentLocation = adminLocation.value;
 let lastSnapshotData = {};
-let historyUnsubscribe = null;
-let peakChart = null;
+let waitChart = null;
 
-// ---------- Helper: normalize timestamps to milliseconds ----------
-function toMs(v) {
-  if (v == null) return null;
-  if (typeof v === 'number' && !isNaN(v)) return v;
-  if (typeof v === 'string') {
-    // numeric string?
-    const n = Number(v);
-    if (!Number.isNaN(n)) return n;
-    // try Date.parse for ISO strings
-    const p = Date.parse(v);
-    if (!Number.isNaN(p)) return p;
-  }
-  return null;
-}
-
-// ---------- UI wiring ----------
+// Listen to location change
 adminLocation.addEventListener('change', () => {
   currentLocation = adminLocation.value;
+  // reload listener
   startQueueListener();
 });
 
+// Refresh button
 refreshBtn.addEventListener('click', () => {
   renderQueue(lastSnapshotData);
 });
 
+// Call Next
 callNextBtn.addEventListener('click', async () => {
   const qRef = ref(db, `queues/${currentLocation}`);
-  const snap = await get(qRef);
-  const data = snap.val() || {};
-  const arr = [];
-  for (const k in data) {
-    if (!data[k]) continue;
-    // skip system nodes
-    if (k === 'history' || k === 'meta' || k === 'serving') continue;
-    const e = data[k];
-    arr.push({ key: k, number: e.number, status: e.status, ts: toMs(e.timestamp || e.createdAt || e.joinedAt) });
-  }
-
-  const waiting = arr.filter(e => e.status === 'waiting').sort((a, b) => (a.number ?? 99999) - (b.number ?? 99999));
-  if (waiting.length === 0) {
-    alert('No waiting users');
-    return;
-  }
-
-  const nextEntry = waiting[0];
-  const nextKey = nextEntry.key;
-  const entryRef = ref(db, `queues/${currentLocation}/${nextKey}`);
-  await set(entryRef, { ...data[nextKey], status: 'called', number: nextEntry.number ?? data[nextKey].number ?? null, calledAt: new Date().toISOString() });
-
-  const servingRef = ref(db, `queues/${currentLocation}/serving`);
-  await set(servingRef, { id: nextKey, number: nextEntry.number ?? data[nextKey].number ?? null, name: data[nextKey].name ?? null, startedAt: Date.now() });
-
-  alert('Called entry ' + (nextEntry.number ?? nextKey));
+  onValue(qRef, async (snap) => {
+    const data = snap.val() || {};
+    // transform to array keyed by number if possible
+    const arr = [];
+    for (const k in data) {
+      if (!data[k]) continue;
+      const e = data[k];
+      arr.push({ key: k, number: e.number, status: e.status });
+    }
+    const waiting = arr.filter(e => e.status === 'waiting').sort((a,b) => a.number - b.number);
+    if (waiting.length === 0) {
+      alert('No waiting users');
+      return;
+    }
+    const next = waiting[0].number;
+    const entryRef = ref(db, `queues/${currentLocation}/${next}`);
+    await set(entryRef, { ...data[next], status: 'called', number: next, calledAt: new Date().toISOString() });
+    const servingRef = ref(db, `serving/${currentLocation}`);
+    await set(servingRef, next);
+    alert('Called number ' + next);
+  }, { onlyOnce: true });
 });
 
-// ---------------- Listeners ----------------
+// Start listener
 function startQueueListener() {
-  // main queue node
   const qRef = ref(db, `queues/${currentLocation}`);
   onValue(qRef, (snap) => {
     const data = snap.val() || {};
     lastSnapshotData = data;
     renderQueue(data);
   });
-
-  // serving pointer listener under queues/<location>/serving
-  const servingRef = ref(db, `queues/${currentLocation}/serving`);
+  // serving pointer
+  const servingRef = ref(db, `serving/${currentLocation}`);
   onValue(servingRef, (s) => {
-    const val = s.exists() ? s.val() : '-';
-    adminServingEl.textContent = (val && typeof val === 'object') ? (val.number ?? val.id ?? val.name ?? '-') : String(val);
-  });
-
-  // detach previous history listener if exists
-  if (typeof historyUnsubscribe === 'function') {
-    try { historyUnsubscribe(); } catch (e) { /* ignore */ }
-    historyUnsubscribe = null;
-  }
-
-  // attach new history listener for analytics/chart
-  const histRef = ref(db, `queues/${currentLocation}/history`);
-  historyUnsubscribe = onValue(histRef, (hsnap) => {
-    const hist = hsnap.val() || {};
-    updateAnalyticsFromHistory(hist, currentLocation);
+    const serving = s.exists() ? s.val() : '-';
+    adminServingEl.textContent = serving;
   });
 }
 
-// ---------------- Render queue table ----------------
+// Compute waiting times from data
+// Preference for timestamps: createdAt -> calledAt -> (skip if none).
+// waitingMinutes = servedAt - createdAt/calledAt (in minutes)
+function computeWaitingTimes(data) {
+  const results = [];
+  for (const k in data) {
+    const e = data[k];
+    if (!e || e.status !== 'served') continue;
+    const servedAtStr = e.servedAt || e.served_at || e.served_at_iso;
+    if (!servedAtStr) continue;
+    const servedAt = Date.parse(servedAtStr);
+    if (isNaN(servedAt)) continue;
+
+    // prefer createdAt if available
+    const createdAtStr = e.createdAt || e.created_at || e.enqueuedAt || e.enqueued_at;
+    const calledAtStr = e.calledAt || e.called_at;
+    let startTs = null;
+    if (createdAtStr && !isNaN(Date.parse(createdAtStr))) {
+      startTs = Date.parse(createdAtStr);
+    } else if (calledAtStr && !isNaN(Date.parse(calledAtStr))) {
+      startTs = Date.parse(calledAtStr);
+    } else {
+      // fallback: if there's an entry key that is numeric and that maybe time-based it's not useful; skip
+      continue;
+    }
+
+    const diffMs = servedAt - startTs;
+    const diffMin = diffMs / 60000; // minutes
+    if (!isFinite(diffMin) || diffMin < 0) continue;
+    results.push({
+      number: e.number || parseInt(k) || null,
+      servedAt,
+      servedAtISO: new Date(servedAt).toISOString(),
+      waitingMinutes: diffMin
+    });
+  }
+
+  // sort by servedAt ascending
+  results.sort((a,b) => a.servedAt - b.servedAt);
+  return results;
+}
+
 function renderQueue(data) {
   const arr = [];
   for (const k in data) {
     if (!data[k]) continue;
-    if (k === 'history' || k === 'meta' || k === 'serving') continue;
     const e = data[k];
     arr.push({
       key: k,
       name: e.name || '',
-      number: (e.number != null) ? e.number : (isFinite(parseInt(k)) ? parseInt(k) : null),
+      number: e.number || (e.number === 0 ? 0 : parseInt(k) || 0),
       status: e.status || 'waiting'
     });
   }
-
-  arr.sort((a, b) => (a.number ?? 0) - (b.number ?? 0));
+  arr.sort((a,b) => a.number - b.number);
   queueBody.innerHTML = '';
-
   for (const e of arr) {
     const tr = document.createElement('tr');
     tr.innerHTML = `
-      <td>${e.number ?? '-'}</td>
-      <td>${escapeHtml(e.name)}</td>
-      <td>${escapeHtml(e.status)}</td>
+      <td>${e.number}</td>
+      <td>${e.name}</td>
+      <td>${e.status}</td>
       <td>
-        ${e.status !== 'served' ? `<button data-key="${e.key}" class="btn btn-sm btn-primary mark-served">Mark Served</button>` : ''}
+        ${e.status !== 'served' ? `<button data-number="${e.number}" class="btn btn-sm btn-primary mark-served">Mark Served</button>` : ''}
       </td>
     `;
     queueBody.appendChild(tr);
@@ -151,125 +167,119 @@ function renderQueue(data) {
 
   document.querySelectorAll('.mark-served').forEach(btn => {
     btn.addEventListener('click', async (ev) => {
-      const key = ev.target.getAttribute('data-key');
-      if (!confirm(`Mark ${key} as served?`)) return;
-
-      const entryRef = ref(db, `queues/${currentLocation}/${key}`);
-      const now = Date.now();
-      const snap = await get(entryRef);
-      const entry = snap.val() || {};
-      await set(entryRef, { ...entry, status: 'served', servedAt: now });
-
-      // clear serving pointer
-      const servingRef = ref(db, `queues/${currentLocation}/serving`);
-      await set(servingRef, null);
-
-      // add to history (store served record) — ensure numeric ms
-      const historyRef = ref(db, `queues/${currentLocation}/history/${key}`);
-      const record = {
-        id: key,
-        name: entry.name || null,
-        number: entry.number ?? null,
-        timestamp: toMs(entry.timestamp ?? entry.createdAt ?? entry.joinedAt ?? now),
-        startedAt: toMs(entry.startedAt ?? (entry.calledAt ? Date.parse(entry.calledAt) : null)),
-        servedAt: now
-      };
-      await set(historyRef, record);
-
-      alert('Marked served: ' + (entry.number ?? key));
+      const num = ev.target.getAttribute('data-number');
+      if (!confirm(`Mark ${num} as served?`)) return;
+      const entryRef = ref(db, `queues/${currentLocation}/${num}`);
+      const now = new Date().toISOString();
+      await set(entryRef, { ...lastSnapshotData[num], status: 'served', servedAt: now, number: parseInt(num) });
+      const servingRef = ref(db, `serving/${currentLocation}`);
+      await set(servingRef, parseInt(num));
+      alert('Marked served: ' + num);
     });
   });
+
+  // update waiting time chart
+  try {
+    const waitingData = computeWaitingTimes(data);
+    updateWaitChart(waitingData);
+  } catch (err) {
+    console.error('Error computing waiting times:', err);
+  }
 }
 
-function escapeHtml(s) {
-  return String(s || '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
-}
-
-// ---------------- Analytics + Chart ----------------
-function drawPeakChart(counts) {
-  const labels = counts.map((_, i) => `${i}:00`);
-  if (peakChart) peakChart.destroy();
-  peakChart = new Chart(peakCanvas, {
-    type: 'bar',
+// Chart creation / update
+function createWaitChart() {
+  if (waitChart) return;
+  waitChart = new Chart(waitChartCtx, {
+    type: 'line',
     data: {
-      labels,
-      datasets: [{
-        label: 'Users Served Per Hour',
-        data: counts,
-        backgroundColor: 'rgba(54,162,235,0.6)',
-        borderColor: 'rgba(54,162,235,1)',
-        borderWidth: 1
-      }]
+      labels: [], // timestamps
+      datasets: [
+        {
+          label: 'Waiting time (minutes)',
+          data: [],
+          fill: false,
+          tension: 0.2,
+          pointRadius: 4,
+          borderWidth: 2
+        },
+        {
+          label: 'Average (minutes)',
+          data: [],
+          type: 'line',
+          borderDash: [6,4],
+          tension: 0,
+          pointRadius: 0,
+          borderWidth: 1
+        }
+      ]
     },
     options: {
       responsive: true,
-      scales: { y: { beginAtZero: true } }
-    }
-  });
-}
-
-function buildFromHistoryObj(histObj) {
-  const arr = Object.values(histObj || {});
-  const waits = [];
-  const counts = new Array(24).fill(0);
-  arr.forEach(h => {
-    const ts = toMs(h.timestamp ?? h.joinedAt ?? null);
-    const start = toMs(h.startedAt ?? null);
-    const servedAt = toMs(h.servedAt ?? start ?? null);
-
-    let waitMs = null;
-    if (ts != null && start != null) waitMs = Math.max(0, start - ts);
-    else if (ts != null && servedAt != null) waitMs = Math.max(0, servedAt - ts);
-
-    if (waitMs != null) waits.push(waitMs);
-    if (servedAt != null) {
-      const hr = new Date(servedAt).getHours();
-      counts[hr] = (counts[hr] || 0) + 1;
-    }
-  });
-  return { waits, counts };
-}
-
-async function buildFromQueueFallback(queueName) {
-  const snap = await get(ref(db, `queues/${queueName}`));
-  const node = snap.val() || {};
-  const waits = [];
-  const counts = new Array(24).fill(0);
-  Object.entries(node).forEach(([k, v]) => {
-    if (!v || typeof v !== 'object') return;
-    if (k === 'history' || k === 'meta' || k === 'serving') return;
-    if (v.status === 'served' || v.status === 'called') {
-      const ts = toMs(v.timestamp ?? v.joinedAt ?? null);
-      const servedAt = toMs(v.servedAt ?? v.startedAt ?? null);
-      if (ts != null && servedAt != null) waits.push(Math.max(0, (v.startedAt || servedAt) - ts));
-      if (servedAt != null) {
-        const hr = new Date(servedAt).getHours();
-        counts[hr] = (counts[hr] || 0) + 1;
+      maintainAspectRatio: false,
+      scales: {
+        x: {
+          type: 'time',
+          time: {
+            tooltipFormat: 'YYYY-MM-DD HH:mm',
+            displayFormats: {
+              hour: 'MMM d, HH:mm',
+              minute: 'HH:mm'
+            }
+          },
+          title: { display: true, text: 'Served at' }
+        },
+        y: {
+          beginAtZero: true,
+          title: { display: true, text: 'Minutes' }
+        }
+      },
+      plugins: {
+        legend: { display: true },
+        tooltip: {
+          callbacks: {
+            label: function(context) {
+              if (context.datasetIndex === 0) {
+                return `${context.dataset.label}: ${Number(context.parsed.y).toFixed(1)} min`;
+              } else {
+                return `${context.dataset.label}: ${Number(context.parsed.y).toFixed(1)} min`;
+              }
+            }
+          }
+        }
       }
     }
   });
-  return { waits, counts };
 }
 
-async function updateAnalyticsFromHistory(histObjOrNull, queueName) {
-  let waits = [], counts = new Array(24).fill(0);
+// Update chart with computed waiting data (array of {servedAt, servedAtISO, waitingMinutes})
+function updateWaitChart(waitingData) {
+  createWaitChart();
 
-  if (histObjOrNull && Object.keys(histObjOrNull).length > 0) {
-    const res = buildFromHistoryObj(histObjOrNull);
-    waits = res.waits;
-    counts = res.counts;
-  } else {
-    const res = await buildFromQueueFallback(queueName);
-    waits = res.waits;
-    counts = res.counts;
-  }
+  // limit to last N points for readability
+  const MAX_POINTS = 50;
+  const pts = waitingData.slice(-MAX_POINTS);
 
-  const avgMin = (waits.length) ? (waits.reduce((a,b)=>a+b,0) / waits.length) / 60000 : 0;
-  avgWaitEl.textContent = avgMin ? (Math.round(avgMin * 10) / 10) + ' mins' : '—';
+  const labels = pts.map(p => p.servedAtISO);
+  const values = pts.map(p => Number(p.waitingMinutes.toFixed(2)));
 
-  drawPeakChart(counts);
+  // compute overall average (over all served entries)
+  const allWaiting = waitingData.map(p => p.waitingMinutes);
+  const avg = allWaiting.length ? (allWaiting.reduce((a,b)=>a+b,0)/allWaiting.length) : 0;
+
+  // dataset 0 -> individual points
+  waitChart.data.labels = labels;
+  waitChart.data.datasets[0].data = values;
+
+  // dataset 1 -> horizontal average line (repeat avg for each label position)
+  const avgLine = labels.map(() => avg > 0 ? Number(avg.toFixed(2)) : null);
+  waitChart.data.datasets[1].data = avgLine;
+
+  waitChart.update();
+
+  // display textual average
+  avgWaitEl.textContent = allWaiting.length ? Number(avg.toFixed(2)) : '-';
 }
 
-// ---------------- Start ----------------
+// start initial listener
 startQueueListener();
-
